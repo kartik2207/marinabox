@@ -18,6 +18,7 @@ OUTPUT_DIR = "/tmp/outputs"
 
 TYPING_DELAY_MS = 12
 TYPING_GROUP_SIZE = 50
+DISPLAY_NUM = 1
 
 Action = Literal[
     "key",
@@ -67,13 +68,21 @@ class ComputerTool(BaseAnthropicTool):
 
     name: Literal["computer"] = "computer"
     api_type: Literal["computer_20241022"] = "computer_20241022"
+
     width: int = 1280
     height: int = 800
     
     def __init__(self, port: int = 8002):
         super().__init__()
+        self.width = int(os.getenv("WIDTH") or 0)
+        self.height = int(os.getenv("HEIGHT") or 0)
+        assert self.width and self.height, "WIDTH, HEIGHT must be set"
         self.api_base_url = f"http://localhost:{port}"
         self.client = httpx.AsyncClient()
+        self.display_num = int(DISPLAY_NUM)
+        self._display_prefix = f"DISPLAY=:{self.display_num} "
+
+        self.xdotool = f"{self._display_prefix}xdotool"
 
     @property
     def options(self) -> ComputerToolOptions:
@@ -85,6 +94,71 @@ class ComputerTool(BaseAnthropicTool):
 
     def to_params(self) -> BetaToolComputerUse20241022Param:
         return {"name": self.name, "type": self.api_type, **self.options}
+    
+    async def screenshot(self):
+        """Take a screenshot of the current screen and return the base64 encoded image."""
+        output_dir = Path(OUTPUT_DIR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"screenshot_{uuid4().hex}.png"
+
+        # Try gnome-screenshot first
+        if shutil.which("gnome-screenshot"):
+            screenshot_cmd = f"{self._display_prefix}gnome-screenshot -f {path} -p"
+        else:
+            # Fall back to scrot if gnome-screenshot isn't available
+            screenshot_cmd = f"{self._display_prefix}scrot -p {path}"
+
+        result = await self.shell(screenshot_cmd, take_screenshot=False)
+        if self._scaling_enabled:
+            x, y = self.scale_coordinates(
+                ScalingSource.COMPUTER, self.width, self.height
+            )
+            await self.shell(
+                f"convert {path} -resize {x}x{y}! {path}", take_screenshot=False
+            )
+
+        if path.exists():
+            return result.replace(
+                base64_image=base64.b64encode(path.read_bytes()).decode()
+            )
+        raise ToolError(f"Failed to take screenshot: {result.error}")
+    
+    async def shell(self, command: str, take_screenshot=True) -> ToolResult:
+        """Run a shell command and return the output, error, and optionally a screenshot."""
+        _, stdout, stderr = await run(command)
+        base64_image = None
+
+        if take_screenshot:
+            # delay to let things settle before taking a screenshot
+            await asyncio.sleep(self._screenshot_delay)
+            base64_image = (await self.screenshot()).base64_image
+
+        return ToolResult(output=stdout, error=stderr, base64_image=base64_image)
+
+    def scale_coordinates(self, source: ScalingSource, x: int, y: int):
+        """Scale coordinates to a target maximum resolution."""
+        if not self._scaling_enabled:
+            return x, y
+        ratio = self.width / self.height
+        target_dimension = None
+        for dimension in MAX_SCALING_TARGETS.values():
+            # allow some error in the aspect ratio - not ratios are exactly 16:9
+            if abs(dimension["width"] / dimension["height"] - ratio) < 0.02:
+                if dimension["width"] < self.width:
+                    target_dimension = dimension
+                break
+        if target_dimension is None:
+            return x, y
+        # should be less than 1
+        x_scaling_factor = target_dimension["width"] / self.width
+        y_scaling_factor = target_dimension["height"] / self.height
+        if source == ScalingSource.API:
+            if x > self.width or y > self.height:
+                raise ToolError(f"Coordinates {x}, {y} are out of bounds")
+            # scale up
+            return round(x / x_scaling_factor), round(y / y_scaling_factor)
+        # scale down
+        return round(x * x_scaling_factor), round(y * y_scaling_factor)
 
     async def __call__(
         self,
@@ -116,10 +190,7 @@ class ComputerTool(BaseAnthropicTool):
 
             # API calls
             if action == "screenshot":
-                response = await self.client.get(f"{self.api_base_url}/screenshot")
-                response.raise_for_status()
-                data = response.json()
-                return ToolResult(base64_image=data["image"])
+                 return await self.screenshot()
 
             params = {}
             if text:

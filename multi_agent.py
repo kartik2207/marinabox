@@ -19,6 +19,7 @@ from langgraph.prebuilt import ToolNode,tools_condition
 import base64
 from io import BytesIO
 import logging
+import asyncio
 
 mb = MarinaboxSDK(videos_path="outputs/videos")
 
@@ -79,7 +80,6 @@ class ShouldContinueOutput(BaseModel):
     should_continue: str
 
 def claude_the_vision_guy(state: GraphState):
-    # Parse which tool to use from orchestrator's thought
     try:
         tool = parse_tool_from_thought(state['orchestrator_thought'])
         state['current_tool'] = tool
@@ -102,7 +102,7 @@ def claude_the_vision_guy(state: GraphState):
 
         responses = mb.computer_use_command(
             session_id,  # First argument is session_id
-            vision_prompt  # Second argument is command
+            "screenshot"  # Second argument is command
         )
         
         # Just store the screenshots, no analysis needed
@@ -113,6 +113,7 @@ def claude_the_vision_guy(state: GraphState):
         
         state['screenshots'] = screenshots
         return state
+        
     except ValueError as e:
         # Handle cases where tool isn't specified
         state['conversation_history'].append(
@@ -392,6 +393,8 @@ def main():
     task = "Go to Google Docs, summarize everything in the document, and draft an email with this summary in Gmail"
     tools_to_use = ["googledocs", "gmail"]
 
+    # mb.set_anthropic_key("")
+    # os.environ['OPENAI_API_KEY'] = ""
 
     try:
         # Create output directories
